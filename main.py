@@ -9,49 +9,54 @@ app = FastAPI(title="TMDB + VidVault API", version="1.0")
 
 TMDB_BASE = "https://tmdb.lewagon.com"
 
-# ---------- Playwright helpers ----------
-_browser = None
-_playwright = None
-
-async def get_browser():
-    global _browser, _playwright
-    if _browser is None:
-        _playwright = await async_playwright().start()
-        _browser = await _playwright.chromium.launch(
+# ---------- VidVault Detection (exact copy from Colab) ----------
+async def scrape_vidvault_page(url: str):
+    """Exact copy of the Colab detect_page_info function."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         )
-    return _browser
+        context = await browser.new_context(
+            accept_downloads=True,
+            viewport={'width': 1280, 'height': 720},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+        page = await context.new_page()
 
-# ---------- Updated scrape function with longer timeouts ----------
-async def scrape_vidvault_page(url: str):
-    browser = await get_browser()
-    context = await browser.new_context(
-        accept_downloads=True,
-        viewport={'width': 1280, 'height': 720},
-        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    )
-    page = await context.new_page()
-    try:
-        # Navigate with a longer timeout and wait for DOM content
-        await page.goto(url, wait_until='domcontentloaded', timeout=60000)
-        # Wait for at least one button to appear (increase timeout to 30s)
-        await page.wait_for_selector('button', timeout=30000)
+        print(f"🔄 Loading VidVault page...")
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        await page.wait_for_selector('button', timeout=10000)
 
-        # Expand subtitle section if present
+        # --- AUTO-EXPAND SUBTITLES ---
+        print("🔍 Looking for subtitle section...")
         try:
-            sub_btn = await page.query_selector('button:has-text("Subtitle Downloads")')
-            if sub_btn:
-                await sub_btn.click()
-                await page.wait_for_timeout(1000)  # extra time for expansion
-        except:
-            pass
+            subtitle_button = await page.query_selector('button:has-text("Subtitle Downloads")')
+            if subtitle_button:
+                print("📝 Found Subtitle Downloads button - clicking to expand...")
+                await subtitle_button.click()
+                await page.wait_for_timeout(1000)
+                print("✅ Subtitle section expanded!")
+            else:
+                subtitle_button = await page.query_selector('button:has-text("Subtitle")')
+                if subtitle_button:
+                    print("📝 Found Subtitle button - clicking to expand...")
+                    await subtitle_button.click()
+                    await page.wait_for_timeout(1000)
+                    print("✅ Subtitle section expanded!")
+        except Exception as e:
+            print(f"⚠️ Could not expand subtitles: {e}")
 
+        # Get page title
+        title = await page.title()
+
+        # DETECT ALL QUALITIES
         qualities = await page.evaluate("""
             () => {
                 const buttons = document.querySelectorAll('button');
                 const results = [];
                 const seen = new Set();
+                
                 buttons.forEach(btn => {
                     const text = btn.textContent.trim();
                     const match = text.match(/(\\d+)\\s*p/i);
@@ -61,97 +66,142 @@ async def scrape_vidvault_page(url: str):
                             seen.add(quality);
                             const sizeMatch = text.match(/[\\(\\[]\\s*([\\d.]+)\\s*(MB|GB)\\s*[\\)\\]]/i);
                             results.push({
+                                text: text,
                                 quality: quality,
-                                size: sizeMatch ? sizeMatch[1] + ' ' + sizeMatch[2] : 'Unknown',
-                                text: text
+                                size: sizeMatch ? sizeMatch[1] + ' ' + sizeMatch[2] : 'Unknown'
                             });
                         }
                     }
                 });
-                const order = {'360p':0,'480p':1,'720p':2,'1080p':3,'4k':4};
-                results.sort((a,b) => (order[a.quality]||999) - (order[b.quality]||999));
+                
+                const order = {'360p': 0, '480p': 1, '720p': 2, '1080p': 3, '4k': 4};
+                results.sort((a, b) => (order[a.quality] || 999) - (order[b.quality] || 999));
                 return results;
             }
         """)
 
+        # DETECT SUBTITLES
         subtitles = await page.evaluate("""
             () => {
                 const buttons = document.querySelectorAll('button');
                 const results = [];
                 const seen = new Set();
+                
                 buttons.forEach(btn => {
                     const text = btn.textContent.trim();
-                    if (text.toLowerCase().includes('subtitle') || text.toLowerCase().includes('.srt')) {
+                    if (text.toLowerCase().includes('subtitle') || 
+                        text.toLowerCase().includes('.srt') ||
+                        text.toLowerCase().includes('english') ||
+                        text.toLowerCase().includes('spanish') ||
+                        text.toLowerCase().includes('french') ||
+                        text.toLowerCase().includes('german') ||
+                        text.toLowerCase().includes('arabic') ||
+                        text.toLowerCase().includes('chinese') ||
+                        text.toLowerCase().includes('japanese') ||
+                        text.toLowerCase().includes('korean')) {
+                        
                         let language = 'Unknown';
-                        const langMatch = text.match(/(English|Spanish|French|German|Arabic|Chinese|Japanese|Korean)/i);
-                        if (langMatch) language = langMatch[0];
+                        const langMatch = text.match(/(English|Spanish|French|German|Arabic|Chinese|Japanese|Korean|Subtitle)/i);
+                        if (langMatch) {
+                            language = langMatch[0];
+                        }
+                        
                         const key = text.toLowerCase();
                         if (!seen.has(key)) {
                             seen.add(key);
-                            results.push({ text: text, language: language });
+                            results.push({
+                                text: text,
+                                language: language
+                            });
                         }
                     }
                 });
+                
                 return results;
             }
         """)
 
-        return {'qualities': qualities, 'subtitles': subtitles}
-    except Exception as e:
-        # Optional: log page content for debugging (uncomment if needed)
-        # content = await page.content()
-        # print(content[:500])
-        raise HTTPException(status_code=500, detail=f"Scraping error: {str(e)}")
-    finally:
-        await context.close()
+        await browser.close()
+        
+        return {
+            'title': title,
+            'qualities': qualities,
+            'subtitles': subtitles,
+            'has_subtitles': len(subtitles) > 0,
+            'url': url
+        }
 
-# ---------- Download URL function (unchanged) ----------
+# ---------- Download helper (exact Colab copy) ----------
 async def get_download_url(url: str, quality: str, subtitle_text: str = None):
-    browser = await get_browser()
-    context = await browser.new_context(
-        accept_downloads=True,
-        viewport={'width': 1280, 'height': 720},
-        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    )
-    page = await context.new_page()
-    try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=60000)
-        await page.wait_for_selector(f'button:has-text("{quality}")', timeout=30000)
+    """Exact copy of Colab download_with_detection, returning only URLs and filenames."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        )
+        context = await browser.new_context(
+            accept_downloads=True,
+            viewport={'width': 1280, 'height': 720},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+        page = await context.new_page()
 
+        print(f"🔄 Loading VidVault page...")
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        
+        # Wait for button
+        await page.wait_for_selector(f'button:has-text("{quality}")', timeout=10000)
+        
+        print(f"⬇️ Downloading {quality} video...")
         async with page.expect_download() as download_info:
             await page.click(f'button:has-text("{quality}")')
+        
         download = await download_info.value
         video_url = download.url
         video_filename = download.suggested_filename or f'video_{quality}.mp4'
 
         subtitle_url = None
         subtitle_filename = None
-        if subtitle_text:
-            try:
-                sub_expand = await page.query_selector('button:has-text("Subtitle Downloads")')
-                if sub_expand:
-                    await sub_expand.click()
-                    await page.wait_for_timeout(500)
-            except:
-                pass
-            sub_btn = await page.query_selector(f'button:has-text("{subtitle_text}")')
-            if sub_btn:
-                async with page.expect_download() as sub_info:
-                    await sub_btn.click()
-                sub_download = await sub_info.value
-                subtitle_url = sub_download.url
-                subtitle_filename = sub_download.suggested_filename or 'subtitles.srt'
 
+        if subtitle_text and subtitle_text != 'None':
+            try:
+                print(f"📝 Downloading subtitle: {subtitle_text}")
+                
+                # Expand subtitle section if needed
+                try:
+                    subtitle_expand = await page.query_selector('button:has-text("Subtitle Downloads")')
+                    if subtitle_expand:
+                        await subtitle_expand.click()
+                        await page.wait_for_timeout(500)
+                except:
+                    pass
+                
+                # Find the specific subtitle button
+                subtitle_button = await page.query_selector(f'button:has-text("{subtitle_text}")')
+                if not subtitle_button:
+                    subtitle_button = await page.query_selector(f'button:has-text("{subtitle_text[:15]}")')
+                
+                if subtitle_button:
+                    async with page.expect_download() as sub_download_info:
+                        await subtitle_button.click()
+                    
+                    sub_download = await sub_download_info.value
+                    subtitle_url = sub_download.url
+                    subtitle_filename = sub_download.suggested_filename or 'subtitles.srt'
+                    print(f"✅ Subtitle downloaded: {subtitle_filename}")
+                else:
+                    print("⚠️ Subtitle button not found")
+            except Exception as e:
+                print(f"⚠️ Could not download subtitles: {e}")
+
+        await browser.close()
+        
         return {
             'video_url': video_url,
             'video_filename': video_filename,
             'subtitle_url': subtitle_url,
             'subtitle_filename': subtitle_filename
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download URL error: {str(e)}")
-    finally:
-        await context.close()
 
 # ---------- TMDB proxy helper ----------
 async def forward_tmdb(path: str, params: dict = None):
@@ -399,11 +449,4 @@ async def tv_stream(
         "subtitle_filename": result.get("subtitle_filename")
     }
 
-# ---------- On startup: warm up browser ----------
-@app.on_event("startup")
-async def startup():
-    try:
-        await get_browser()
-        print("✅ Browser warmed up successfully.")
-    except Exception as e:
-        print(f"❌ Browser warm-up failed: {e}")
+# ---------- No startup warm-up needed (browser created per call) ----------
