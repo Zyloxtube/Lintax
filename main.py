@@ -1,14 +1,9 @@
-import asyncio
 import os
+import asyncio
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
 import httpx
 from typing import Optional
 from playwright.async_api import async_playwright
-import nest_asyncio
-
-# Only needed if running in Jupyter/Colab, not needed for standard uvicorn
-# nest_asyncio.apply()
 
 app = FastAPI(title="TMDB + VidVault API", version="1.0")
 
@@ -49,7 +44,6 @@ async def scrape_vidvault_page(url: str):
         except:
             pass
 
-        # Qualities
         qualities = await page.evaluate("""
             () => {
                 const buttons = document.querySelectorAll('button');
@@ -77,7 +71,6 @@ async def scrape_vidvault_page(url: str):
             }
         """)
 
-        # Subtitles
         subtitles = await page.evaluate("""
             () => {
                 const buttons = document.querySelectorAll('button');
@@ -101,6 +94,8 @@ async def scrape_vidvault_page(url: str):
         """)
 
         return {'qualities': qualities, 'subtitles': subtitles}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scraping error: {str(e)}")
     finally:
         await context.close()
 
@@ -146,6 +141,8 @@ async def get_download_url(url: str, quality: str, subtitle_text: str = None):
             'subtitle_url': subtitle_url,
             'subtitle_filename': subtitle_filename
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download URL error: {str(e)}")
     finally:
         await context.close()
 
@@ -153,10 +150,54 @@ async def get_download_url(url: str, quality: str, subtitle_text: str = None):
 async def forward_tmdb(path: str, params: dict = None):
     url = f"{TMDB_BASE}/{path.lstrip('/')}"
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
+        try:
+            resp = await client.get(url, params=params)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"TMDB proxy error: {str(e)}")
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
         return resp.json()
+
+# ---------- Root ----------
+@app.get("/")
+async def root():
+    return {
+        "message": "TMDB + VidVault API. See /docs for Swagger (if enabled).",
+        "endpoints": {
+            "health": "/health",
+            "test_browser": "/test-browser",
+            "movie_details": "/movie/{id}",
+            "tv_details": "/tv/{id}",
+            "movie_qualities": "/movie/{id}/qualities",
+            "movie_subtitles": "/movie/{id}/subtitles",
+            "movie_stream": "/movie/{id}/stream?quality=...&subtitle=...",
+            "tv_qualities": "/tv/{id}/season/{s}/episode/{e}/qualities",
+            "tv_subtitles": "/tv/{id}/season/{s}/episode/{e}/subtitles",
+            "tv_stream": "/tv/{id}/season/{s}/episode/{e}/stream?quality=...&subtitle=..."
+        }
+    }
+
+# ---------- Health and test browser ----------
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.get("/test-browser")
+async def test_browser():
+    """Test if Playwright can launch Chromium and load a page."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
+            page = await browser.new_page()
+            await page.goto("https://example.com", wait_until="domcontentloaded")
+            title = await page.title()
+            await browser.close()
+            return {"status": "Browser works!", "title": title}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Browser test failed: {str(e)}")
 
 # ---------- TMDB Endpoints ----------
 @app.get("/search/multi")
@@ -248,7 +289,6 @@ async def trending_tv_day():
 async def trending_tv_week():
     return await forward_tmdb("trending/tv/week")
 
-# Popular, Top Rated, Latest, etc.
 @app.get("/movie/popular")
 async def movie_popular():
     return await forward_tmdb("movie/popular")
@@ -290,7 +330,6 @@ async def tv_on_the_air():
     return await forward_tmdb("tv/on_the_air")
 
 # ---------- Custom VidVault Endpoints ----------
-# Movie
 @app.get("/movie/{movie_id}/qualities")
 async def movie_qualities(movie_id: int):
     url = f"https://vidvault.ru/movie/{movie_id}"
@@ -320,7 +359,6 @@ async def movie_stream(
         "subtitle_filename": result.get("subtitle_filename")
     }
 
-# TV
 @app.get("/tv/{tv_id}/season/{season}/episode/{episode}/qualities")
 async def tv_qualities(tv_id: int, season: int, episode: int):
     url = f"https://vidvault.ru/tv/{tv_id}/{season}/{episode}"
@@ -354,21 +392,11 @@ async def tv_stream(
         "subtitle_filename": result.get("subtitle_filename")
     }
 
-# Health check
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-# --- Optional: on startup, warm up browser ---
+# ---------- On startup: warm up browser ----------
 @app.on_event("startup")
 async def startup():
-    # Pre-warm the browser to speed up first request
     try:
         await get_browser()
+        print("✅ Browser warmed up successfully.")
     except Exception as e:
-        print(f"Browser warm-up failed: {e}")
-
-# --- If run directly (for debugging) ---
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"❌ Browser warm-up failed: {e}")
