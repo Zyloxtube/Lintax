@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:python-3.11
+FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
 
 WORKDIR /app
 COPY requirements.txt .
