@@ -23,6 +23,7 @@ async def get_browser():
         )
     return _browser
 
+# ---------- Updated scrape function with longer timeouts ----------
 async def scrape_vidvault_page(url: str):
     browser = await get_browser()
     context = await browser.new_context(
@@ -32,15 +33,17 @@ async def scrape_vidvault_page(url: str):
     )
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        await page.wait_for_selector('button', timeout=10000)
+        # Navigate with a longer timeout and wait for DOM content
+        await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        # Wait for at least one button to appear (increase timeout to 30s)
+        await page.wait_for_selector('button', timeout=30000)
 
-        # Expand subtitle section
+        # Expand subtitle section if present
         try:
             sub_btn = await page.query_selector('button:has-text("Subtitle Downloads")')
             if sub_btn:
                 await sub_btn.click()
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(1000)  # extra time for expansion
         except:
             pass
 
@@ -95,10 +98,14 @@ async def scrape_vidvault_page(url: str):
 
         return {'qualities': qualities, 'subtitles': subtitles}
     except Exception as e:
+        # Optional: log page content for debugging (uncomment if needed)
+        # content = await page.content()
+        # print(content[:500])
         raise HTTPException(status_code=500, detail=f"Scraping error: {str(e)}")
     finally:
         await context.close()
 
+# ---------- Download URL function (unchanged) ----------
 async def get_download_url(url: str, quality: str, subtitle_text: str = None):
     browser = await get_browser()
     context = await browser.new_context(
@@ -108,8 +115,8 @@ async def get_download_url(url: str, quality: str, subtitle_text: str = None):
     )
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        await page.wait_for_selector(f'button:has-text("{quality}")', timeout=10000)
+        await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        await page.wait_for_selector(f'button:has-text("{quality}")', timeout=30000)
 
         async with page.expect_download() as download_info:
             await page.click(f'button:has-text("{quality}")')
