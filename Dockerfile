@@ -1,11 +1,8 @@
 FROM python:3.11-slim
 
-# Install essential system dependencies for Chromium (headless mode)
+# Install minimal system dependencies for Chromium (headless mode)
+# NOTE: 'libgl1-mesa-glx' is replaced by 'libgl1' (modern package name)
 RUN apt-get update && apt-get install -y \
-    curl \
-    wget \
-    gnupg \
-    && apt-get install -y \
     libnss3 \
     libatk-bridge2.0-0 \
     libdrm2 \
@@ -24,8 +21,7 @@ RUN apt-get update && apt-get install -y \
     libxfixes3 \
     libxrender1 \
     libxshmfence1 \
-    libgl1-mesa-glx \
-    libgl1-mesa-dri \
+    libgl1 \
     libcups2 \
     libdbus-1-3 \
     libexpat1 \
@@ -39,11 +35,9 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright (without running `install-deps`)
-RUN pip install --no-cache-dir playwright==1.48.0
-
-# Install Chromium browser (this downloads the browser binary)
-RUN playwright install chromium
+# Install Playwright (browser binary only – no `install-deps`)
+RUN pip install --no-cache-dir playwright==1.48.0 && \
+    playwright install chromium
 
 WORKDIR /app
 COPY requirements.txt .
@@ -51,5 +45,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Run the app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
